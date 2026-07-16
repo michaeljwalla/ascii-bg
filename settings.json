@@ -1,0 +1,4 @@
+{
+    "accepted-filetypes": [ ".jpeg", ".png", ".jpg", ".bmp", ".tiff", ".gif", ".webp" ],
+    "cache-path": "~/.cache/ascii-bg"
+}
