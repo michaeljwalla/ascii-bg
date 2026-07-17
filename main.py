@@ -1,7 +1,10 @@
 from dataclasses import dataclass
 from enum import Enum
+from random import choice
 import shlex
 import sys
+from time import time
+from tkinter import Image
 from typing import Any, Callable, override
 from PySide6 import QtCore
 from PySide6.QtGui import QFont
@@ -9,6 +12,9 @@ from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
 import subprocess
 from pathlib import Path
 import json
+
+from PIL import Image
+from ansi2html import Ansi2HTMLConverter
 
 HELP_OUTPUT = '''Usage: asciibg [args-for-script] [file-or-directory] -- [args-to-pass]
             args-for-script:
@@ -127,6 +133,7 @@ class ExecState:
         \nPassed Arguments: {self.PassArgs}"
 
 
+
 def init_parse() -> ExecState:
     #grab settings
     with open(Path(__file__).resolve().parent / "settings.json", "r") as f:
@@ -188,28 +195,106 @@ def init_parse() -> ExecState:
         PassArgs    = pass_args
     )
 
+class Instance:
+    app: QApplication
+    window: QMainWindow
+    label: QLabel
+    def __init__(self):
+        self.app = QApplication(sys.argv)
+        self.app.setStyleSheet('''* {
+                        background-color: black;
+                        color: white;
+        }''')
 
+        self.label = QLabel("Hello, world!")
+        self.label.setWordWrap(True)
+        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.label.setFont(QFont("Monospace", 8))
+
+        self.window = QMainWindow()
+        self.window.setCentralWidget(self.label)
+        self.window.resize( QApplication.primaryScreen().size() )
+    
+    def write(self, s: str):
+        self.label.setText(s)
+    
+    def read(self):
+        return self.label.text()
+    
+    def show(self):
+        self.window.show()
+
+    def hide(self):
+        self.window.hide()
+    
+    def exec(self):
+        return self.app.exec()
+
+def grayscale_at(input: Path, output:Path):
+    Image.open(input).convert('L').save(output)
+
+@dataclass
+class LiveState:
+    Exec: ExecState
+    Instance: Instance
+    Current: Path | None = None
+    LastUpdate: float = 0
+    _Converter = Ansi2HTMLConverter()
+
+    @staticmethod
+    def _fetch(p: Path, args: list[str]):
+        args = ["ascii-image-converter"] + args + [str(p)]
+        result = subprocess.run(args, capture_output=True, text=True)
+        return result.stdout
+    
+    def _fetch_or_gen_cache(self, p:Path):
+        cached = self.Exec.CachePath / (p.name + str(p.__hash__()) + ".html")
+        if cached.exists():
+            return cached.read_text()
+        
+        # experimental (failed)
+        if 0:
+            grey_cached = self.Exec.CachePath / ("grey"+cached.name)
+            run(lambda: grayscale_at(p, grey_cached), err="Failed to grayscale image")
+            out = LiveState._fetch(grey_cached, self.Exec.PassArgs)
+        else:
+            out = self._Converter.convert(
+                LiveState._fetch(p, self.Exec.PassArgs)
+            )
+        #
+        cached.write_text( out )
+        return out
+        
+    def ready(self):
+        if not self.LastUpdate:
+            return True
+        if self.Exec.Arguments.speed == 0:
+            return False
+        return time() - self.LastUpdate >= self.Exec.Arguments.speed
+    
+
+    def next(self) -> Path:
+        if self.Current and len(self.Exec.Files) <= 1:
+            self.LastUpdate = time()
+        else:
+            cur = choice([i for i in self.Exec.Files if i is not self.Current])
+            self.Instance.write(self._fetch_or_gen_cache(cur))
+            self.Current = cur
+        
+        self.LastUpdate = time()
+        return self.Current
+
+
+    
 def main():
-    app_state = init_parse()
-    print(app_state)
+    exec_state = init_parse()
+    instance = Instance()
+    instance.show()
+
+    live_state = LiveState(Exec=exec_state, Instance=instance)
+    print(live_state.next())
+
+    exit(instance.exec())
 
 if __name__ == "__main__":
     main()
-
-exit()
-app = QApplication(sys.argv)
-app.setStyleSheet('''* {
-                  background-color: black;
-                  color: white;
-}''')
-
-window = QMainWindow()
-
-label = QLabel("Hello, Wayland!")
-label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-label.setFont(QFont("Monospace", 14))
-
-window.setCentralWidget(label)
-window.resize(400, 200)
-window.show()
-sys.exit(app.exec())
