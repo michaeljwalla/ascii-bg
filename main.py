@@ -8,7 +8,7 @@ from tkinter import Image
 from typing import Any, Callable, override
 from PySide6 import QtCore
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
+from PySide6.QtWidgets import QApplication, QMainWindow, QTextEdit
 import subprocess
 from pathlib import Path
 import json
@@ -198,7 +198,7 @@ def init_parse() -> ExecState:
 class Instance:
     app: QApplication
     window: QMainWindow
-    label: QLabel
+    view: QTextEdit
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setStyleSheet('''* {
@@ -206,20 +206,20 @@ class Instance:
                         color: white;
         }''')
 
-        self.label = QLabel("Hello, world!")
-        self.label.setWordWrap(True)
-        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.label.setFont(QFont("Monospace", 8))
+        self.view = QTextEdit()
+        self.view.setReadOnly(True)
+        self.view.setFont(QFont("Monospace", 8))
+        self.view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
 
         self.window = QMainWindow()
-        self.window.setCentralWidget(self.label)
-        self.window.resize( QApplication.primaryScreen().size() )
+        self.window.setCentralWidget(self.view)
+        self.window.resize(QApplication.primaryScreen().size())
     
     def write(self, s: str):
-        self.label.setText(s)
+        self.view.setText(s)
     
     def read(self):
-        return self.label.text()
+        return self.view.toPlainText()
     
     def show(self):
         self.window.show()
