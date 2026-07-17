@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run --script
 from dataclasses import dataclass
 from enum import Enum
 from random import choice
@@ -7,14 +8,15 @@ from time import time
 from tkinter import Image
 from typing import Any, Callable, override
 from PySide6 import QtCore
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QMainWindow, QTextEdit
+from PySide6.QtGui import QFont, QFontMetricsF, QImage, QPixmap
+from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QTextEdit
 import subprocess
 from pathlib import Path
 import json
 
 from PIL import Image
 from ansi2html import Ansi2HTMLConverter
+
 
 HELP_OUTPUT = '''Usage: asciibg [args-for-script] [file-or-directory] -- [args-to-pass]
             args-for-script:
@@ -87,13 +89,13 @@ class ScriptArguments:
         elif arg == AT.MODE:
             self.mode = run(
                 lambda: self.ModeType[args[0].upper()],
-                err=f"usage: --dims {"|".join([i.name for i in self.ModeType])}"
+                err=f"usage: --mode {"|".join([i.name.lower() for i in self.ModeType])}"
             )
             return args[1:]
         elif arg == AT.CACHE:
             self.cache = run(
                 lambda: self.CacheType[args[0].upper()],
-                err=f"usage: --dims {"|".join([i.name for i in self.ModeType])}"
+                err=f"usage: --dims {"|".join([i.name.lower() for i in self.ModeType])}"
             )
             return args[1:]
         elif arg == AT.SPEED:
@@ -136,7 +138,15 @@ class ExecState:
 
 def init_parse() -> ExecState:
     #grab settings
-    with open(Path(__file__).resolve().parent / "settings.json", "r") as f:
+    CONFIG_FILE = Path("~/.config/ascii-bg/config.json").expanduser()
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text('''{
+    "accepted-filetypes": [ "jpeg", "png", "jpg", "bmp", "tiff", "gif", "webp" ],
+    "cache-path": "~/.cache/ascii-bg",
+    "default-args": ["--mode", "static", "--cache", "lazy", "--dims", "0x0", "--speed", 0]
+}''')
+    with open(CONFIG_FILE, "r") as f:
         data = json.load(f)
         CACHE_PATH:str = run(lambda: data["cache-path"], "Missing 'cache-path' in settings.json")
         FILETYPES:set[str] = run(lambda: set("."+i for i in data["accepted-filetypes"]), other=set(), err="Missing 'accepted-filetypes' in settings.json")
@@ -165,7 +175,7 @@ def init_parse() -> ExecState:
     run(lambda: len(sys.argv) <= 1 and Exception(), err=HELP_OUTPUT)
 
     # input parameters
-    local_args, path_arg, pass_args = arg_split(shlex.split(sys.argv[1]))
+    local_args, path_arg, pass_args = arg_split([i.strip() for i in sys.argv[1:]])
     final_args = ScriptArguments(ARGUMENTS).set(local_args)
     files = []
 
@@ -198,28 +208,49 @@ def init_parse() -> ExecState:
 class Instance:
     app: QApplication
     window: QMainWindow
-    view: QTextEdit
+    view: QLabel
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setStyleSheet('''* {
                         background-color: black;
                         color: white;
         }''')
+        
+        # font
+        font = QFont("Monospace", 8)
 
-        self.view = QTextEdit()
-        self.view.setReadOnly(True)
-        self.view.setFont(QFont("Monospace", 8))
-        self.view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        # screen size (logical px)
+        screen = QApplication.primaryScreen()
+        geo = screen.geometry()
+        w_px, h_px = geo.width(), geo.height()
 
+        # per-character cell size from the actual font
+        fm = QFontMetricsF(font)
+        char_w = fm.horizontalAdvance("M")
+        line_h = fm.lineSpacing()
+
+        # grid dimensions
+        self.cols = int(w_px // char_w)
+        self.rows = int(h_px // line_h)
+
+        # image
+        self.image = QImage()
+
+        self.view = QLabel()
+        self.view.setPixmap(QPixmap.fromImage(self.image))
+        self.view.setScaledContents(True)
+        self.view.setContentsMargins(0, 0, 0, 0)
+
+        # window
         self.window = QMainWindow()
         self.window.setCentralWidget(self.view)
         self.window.resize(QApplication.primaryScreen().size())
+        self.window.setWindowTitle("ascii-bg")
+        QApplication.setDesktopFileName("ascii-bg")
     
-    def write(self, s: str):
-        self.view.setText(s)
-    
-    def read(self):
-        return self.view.toPlainText()
+    def set(self, data: bytes):
+        self.image.loadFromData(data)
+        self.view.setPixmap(QPixmap.fromImage(self.image))
     
     def show(self):
         self.window.show()
@@ -247,10 +278,10 @@ class LiveState:
         result = subprocess.run(args, capture_output=True, text=True)
         return result.stdout
     
-    def _fetch_or_gen_cache(self, p:Path):
-        cached = self.Exec.CachePath / (p.name + str(p.__hash__()) + ".html")
+    def _fetch_or_gen_cache(self, p:Path) -> bytes:
+        cached = (self.Exec.CachePath / (p.stem + "-ascii-art.png"))
         if cached.exists():
-            return cached.read_text()
+            return cached.read_bytes()
         
         # experimental (failed)
         if 0:
@@ -258,12 +289,14 @@ class LiveState:
             run(lambda: grayscale_at(p, grey_cached), err="Failed to grayscale image")
             out = LiveState._fetch(grey_cached, self.Exec.PassArgs)
         else:
-            out = self._Converter.convert(
-                LiveState._fetch(p, self.Exec.PassArgs)
-            )
+            dims = [
+                "-d", f"{self.Instance.cols},{str(self.Instance.rows)}",
+                "--save-img", str(cached.parent)
+                ]
+            LiveState._fetch(p, self.Exec.PassArgs+dims)
         #
-        cached.write_text( out )
-        return out
+        # cached.write_text( out )
+        return self._fetch_or_gen_cache(p)
         
     def ready(self):
         if not self.LastUpdate:
@@ -278,7 +311,7 @@ class LiveState:
             self.LastUpdate = time()
         else:
             cur = choice([i for i in self.Exec.Files if i is not self.Current])
-            self.Instance.write(self._fetch_or_gen_cache(cur))
+            self.Instance.set( self._fetch_or_gen_cache(cur) )
             self.Current = cur
         
         self.LastUpdate = time()

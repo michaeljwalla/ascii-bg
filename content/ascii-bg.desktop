@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ascii-bg
+Exec=/usr/sbin/uv run %U
+Icon=
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=ascii-bg
