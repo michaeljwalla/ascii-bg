@@ -3,3 +3,5 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 uv tool install . --force
+
+ascii-bg
