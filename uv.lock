@@ -14,7 +14,7 @@ wheels = [
 [[package]]
 name = "ascii-bg"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "ansi2html" },
     { name = "pillow" },

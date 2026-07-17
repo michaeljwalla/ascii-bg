@@ -2,23 +2,23 @@
 from dataclasses import dataclass
 from enum import Enum
 from random import choice
-import shlex
 import sys
 from time import time
-from tkinter import Image
 from typing import Any, Callable, override
-from PySide6 import QtCore
+from PySide6 import QtCore  # noqa: F401
 from PySide6.QtGui import QFont, QFontMetricsF, QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QTextEdit
+from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QTextEdit  # noqa: F401
 import subprocess
 from pathlib import Path
 import json
+
+from abc import ABC, abstractmethod
 
 from PIL import Image
 from ansi2html import Ansi2HTMLConverter
 
 
-HELP_OUTPUT = '''Usage: asciibg [args-for-script] [file-or-directory] -- [args-to-pass]
+HELP_OUTPUT = '''Usage: ascii-bg [args-for-script] [file-or-directory] -- [args-to-pass]
             args-for-script:
                 --cache <m>   - cache images immediately
                     Lazy, Preload
@@ -26,6 +26,8 @@ HELP_OUTPUT = '''Usage: asciibg [args-for-script] [file-or-directory] -- [args-t
                 --mode <m>  - options when selecting from directory
                     static, cycle, random
                 --speed <s> - speed, in seconds, to change on
+                --display <m> - what to draw from
+                    swaybg, pyside
                 
             file-or-directory:
                 select from one file, or choose randomly from dir
@@ -42,7 +44,7 @@ def run(f:Callable[..., Any], other: Any=None, err:str|None=None):
         if issubclass(type(x), Exception):
             raise x
         return x
-    except Exception as e:
+    except Exception:
         if err:
             P_ERR(err)
             exit(1)
@@ -61,6 +63,7 @@ class ScriptArguments:
         DIMS = "--dims"
         MODE = "--mode"
         SPEED = "--speed"
+        DISPLAY = "--display"
 
 
     class ModeType(Enum):
@@ -70,6 +73,11 @@ class ScriptArguments:
     class CacheType(Enum):
         LAZY = 0,
         NOW = 1
+    class DisplayType(Enum):
+        PYSIDE = 0,
+        SWAYBG = 1,
+    
+    display: DisplayType = DisplayType.PYSIDE
     mode: ModeType = ModeType.STATIC
     cache: CacheType = CacheType.LAZY
     width: int = 0
@@ -77,7 +85,7 @@ class ScriptArguments:
     speed: float = 0
 
     def __str__(self):
-        return f"--mode {self.mode.name.lower()} --cache {self.cache.name.lower()} --dims {self.width}x{self.height} --speed {self.speed:.3f}"
+        return f"--mode {self.mode.name.lower()} --cache {self.cache.name.lower()} --dims {self.width}x{self.height} --speed {self.speed:.3f} --display {self.display.name.lower()}"
     def __setArg(self, arg: ScriptArguments.ArgType, args: list[str]) -> list[str]:
         AT = ScriptArguments.ArgType
         if arg == AT.DIMS:
@@ -96,6 +104,12 @@ class ScriptArguments:
             self.cache = run(
                 lambda: self.CacheType[args[0].upper()],
                 err=f"usage: --dims {"|".join([i.name.lower() for i in self.ModeType])}"
+            )
+            return args[1:]
+        elif arg == AT.DISPLAY:
+            self.display = run(
+                lambda: self.DisplayType[args[0].upper()],
+                err=f"usage: --display {"|".join([i.name.lower() for i in self.DisplayType])}"
             )
             return args[1:]
         elif arg == AT.SPEED:
@@ -176,7 +190,6 @@ def init_parse() -> ExecState:
 
     # input parameters
     local_args, path_arg, pass_args = arg_split([i.strip() for i in sys.argv[1:]])
-    final_args = ScriptArguments(ARGUMENTS).set(local_args)
     files = []
 
     run(lambda: path_arg.exists() or Exception(), f"{path_arg}: No such file or directory")
@@ -193,7 +206,8 @@ def init_parse() -> ExecState:
 
     
     run(lambda: len(files) or Exception(), err=f"{path_arg}: No suitable file(s) found.")
-
+    final_args = ScriptArguments(ARGUMENTS).set(local_args)
+    
     # check for existing at cached location
     cache = run(Path(CACHE_PATH).expanduser().resolve, f"Couldn't generate cache at {CACHE_PATH}")
     run(lambda: Path.mkdir(cache, parents=True, exist_ok=True), f"Couldn't generate cache at {CACHE_PATH}")
@@ -205,10 +219,28 @@ def init_parse() -> ExecState:
         PassArgs    = pass_args
     )
 
-class Instance:
+class Instance(ABC):
+    rows: int
+    cols: int
+
+    @abstractmethod
+    def __init__(self):
+        pass
+
+    @abstractmethod
+    def set(self, data):
+        pass
+
+    @abstractmethod
+    def exec(self) -> int:
+        pass
+    
+class PySideInstance(Instance):
     app: QApplication
     window: QMainWindow
     view: QLabel
+
+    @override
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setStyleSheet('''* {
@@ -248,8 +280,8 @@ class Instance:
         self.window.setWindowTitle("ascii-bg")
         QApplication.setDesktopFileName("ascii-bg")
     
-    def set(self, data: bytes):
-        self.image.loadFromData(data)
+    def set(self, data: Path):
+        self.image.load(str(data))
         self.view.setPixmap(QPixmap.fromImage(self.image))
     
     def show(self):
@@ -258,9 +290,43 @@ class Instance:
     def hide(self):
         self.window.hide()
     
+    @override
     def exec(self):
+        self.show()
         return self.app.exec()
 
+class SwayInstance(Instance):
+    path: Path | None
+
+    @override
+    def __init__(self):
+        self.path = None
+
+        self.app = QApplication(sys.argv)
+        font = QFont("Monospace", 8)
+        screen = QApplication.primaryScreen()
+        geo = screen.geometry()
+        w_px, h_px = geo.width(), geo.height()
+
+        fm = QFontMetricsF(font)
+        char_w = fm.horizontalAdvance("M")
+        line_h = fm.lineSpacing()
+
+        self.cols = int(w_px // char_w)
+        self.rows = int(h_px // line_h)
+
+    @override
+    def set(self, data: Path):
+        self.path = data
+
+    @override
+    def exec(self) -> int:
+        if self.path is None:
+            return 1
+        proc = subprocess.run(
+            ["swaybg", "-i", str(self.path), "-m", "fill"]
+        )
+        return proc.returncode
 def grayscale_at(input: Path, output:Path):
     Image.open(input).convert('L').save(output)
 
@@ -278,10 +344,10 @@ class LiveState:
         result = subprocess.run(args, capture_output=True, text=True)
         return result.stdout
     
-    def _fetch_or_gen_cache(self, p:Path) -> bytes:
+    def _fetch_or_gen_cache(self, p:Path) -> Path:
         cached = (self.Exec.CachePath / (p.stem + "-ascii-art.png"))
         if cached.exists():
-            return cached.read_bytes()
+            return cached
         
         # experimental (failed)
         if 0:
@@ -318,11 +384,16 @@ class LiveState:
         return self.Current
 
 
-    
+def get_instance(i: ScriptArguments.DisplayType) -> Instance:
+    return {
+        ScriptArguments.DisplayType.PYSIDE: PySideInstance,
+        ScriptArguments.DisplayType.SWAYBG: SwayInstance,
+    }[i]()
+
 def main():
     exec_state = init_parse()
-    instance = Instance()
-    instance.show()
+
+    instance = get_instance(exec_state.Arguments.display)
 
     live_state = LiveState(Exec=exec_state, Instance=instance)
     print(live_state.next())
