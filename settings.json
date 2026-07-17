@@ -1,4 +1,5 @@
 {
-    "accepted-filetypes": [ ".jpeg", ".png", ".jpg", ".bmp", ".tiff", ".gif", ".webp" ],
-    "cache-path": "~/.cache/ascii-bg"
+    "accepted-filetypes": [ "jpeg", "png", "jpg", "bmp", "tiff", "gif", "webp" ],
+    "cache-path": "~/.cache/ascii-bg",
+    "default-args": ["--mode", "static", "--cache", "lazy", "--dims", "0x0", "--speed", 0]
 }
