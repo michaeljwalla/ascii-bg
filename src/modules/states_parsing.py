@@ -1,0 +1,262 @@
+
+from dataclasses import dataclass
+from enum import Enum
+import json
+import os
+from pathlib import Path
+from random import choice
+import subprocess
+import sys
+from time import time
+
+from PIL import Image
+from modules.exits import run_or_exit as run
+from modules.instances import Instance
+
+HELP_OUTPUT = '''Usage: ascii-bg [args-for-script] [file-or-directory] -- [args-to-pass]
+    args-for-script:
+        --cache <m>   - cache images immediately
+            Lazy, Preload
+        --dims <WxH>   - max dimension to scale to
+        --mode <m>  - options when selecting from directory
+            static, cycle, random
+        --speed <s> - speed, in seconds, to change on
+        --display <m> - what to draw from
+            swaybg, pyside
+        
+    file-or-directory:
+        select from one file, or choose randomly from dir
+
+    args-to-pass:
+        any arguments to pass into ascii-image-convert'''
+
+class ScriptArguments:
+    class ArgType(Enum):
+        # @staticmethod
+        # def fromString(s: str):
+        #     try:
+        #         return ScriptArguments.ArgType(s)
+        #     except Exception as e:
+        #         return None
+        NEVER = ""
+        CACHE = "--cache"
+        DIMS = "--dims"
+        MODE = "--mode"
+        SPEED = "--speed"
+        DISPLAY = "--display"
+
+
+    class ModeType(Enum):
+        STATIC = 0
+        CYCLE = 1
+        RANDOM = 2
+    class CacheType(Enum):
+        LAZY = 0,
+        NOW = 1
+    class DisplayType(Enum):
+        PYSIDE = 0,
+        SWAYBG = 1,
+    
+    display: DisplayType = DisplayType.PYSIDE
+    mode: ModeType = ModeType.STATIC
+    cache: CacheType = CacheType.LAZY
+    width: int = 0
+    height: int = 0
+    speed: float = 0
+
+    def __str__(self):
+        return f"--mode {self.mode.name.lower()} --cache {self.cache.name.lower()} --dims {self.width}x{self.height} --speed {self.speed:.3f} --display {self.display.name.lower()}"
+    def __setArg(self, arg: ScriptArguments.ArgType, args: list[str]) -> list[str]:
+        AT = ScriptArguments.ArgType
+        if arg == AT.DIMS:
+            dims = run(lambda: tuple(int(i) for i in args[0].split("x")), err="usage: --dims WxH")
+            w, h = dims
+            run(lambda: w > 0 and h > 0 and ValueError(), err="width/height must be positive")
+            self.width, self.height = w, h
+            return args[1:]
+        elif arg == AT.MODE:
+            self.mode = run(
+                lambda: self.ModeType[args[0].upper()],
+                err=f"usage: --mode {"|".join([i.name.lower() for i in self.ModeType])}"
+            )
+            return args[1:]
+        elif arg == AT.CACHE:
+            self.cache = run(
+                lambda: self.CacheType[args[0].upper()],
+                err=f"usage: --dims {"|".join([i.name.lower() for i in self.ModeType])}"
+            )
+            return args[1:]
+        elif arg == AT.DISPLAY:
+            self.display = run(
+                lambda: self.DisplayType[args[0].upper()],
+                err=f"usage: --display {"|".join([i.name.lower() for i in self.DisplayType])}"
+            )
+            return args[1:]
+        elif arg == AT.SPEED:
+            s = run(lambda: float(args[0]), err="usage: --speed <s>")
+            run(lambda: s < 0 and ValueError(), err="speed must be non-negative")
+            self.speed = s
+            return args[1:]
+
+        run(Exception, err=f"Invalid: self.__setArg({arg}, {args})")
+        return []
+
+    def set(self, args: list[str]) -> ScriptArguments:
+        while len(args):
+            next = args[0].strip()
+            if not next:
+                arg = args[1:]
+                continue
+            elif not next.startswith("--"):
+                run(Exception, err=HELP_OUTPUT)
+            arg = run(lambda: self.ArgType[next[2:].upper()], err=f"Unknown argument: {next}\n{HELP_OUTPUT}")
+            args = self.__setArg(arg, args[1:])
+        return self
+    def __init__(self, args:list[str]=[]):
+        self.set(args)    
+            
+@dataclass
+class ExecState:
+    CachePath: Path
+    Files: list[Path]
+    Arguments: ScriptArguments
+    PassArgs: list[str]
+    
+    def __str__(self):
+        return f"Cache: {str(self.CachePath)} \
+        \nFiles: {[str(i.name) for i in self.Files]} \
+        \nArguments: \"{self.Arguments}\" \
+        \nPassed Arguments: {self.PassArgs}"
+
+
+
+def init_parse() -> ExecState:
+    #grab settings
+    CONFIG_FILE = Path("~/.config/ascii-bg/config.json").expanduser()
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text('''{
+    "accepted-filetypes": [ "jpeg", "png", "jpg", "bmp", "tiff", "gif", "webp" ],
+    "cache-path": "~/.cache/ascii-bg",
+    "default-args": ["--mode", "static", "--cache", "lazy", "--dims", "0x0", "--speed", 0]
+}''')
+    with open(CONFIG_FILE, "r") as f:
+        data = json.load(f)
+        CACHE_PATH:str = run(lambda: data["cache-path"], "Missing 'cache-path' in settings.json")
+        FILETYPES:set[str] = run(lambda: set("."+i for i in data["accepted-filetypes"]), other=set(), err="Missing 'accepted-filetypes' in settings.json")
+        ARGUMENTS:list[str] = run(lambda: data["default-args"], other=[])
+        #sanity check
+        run(lambda: isinstance(CACHE_PATH, str) or Exception(), err="cache-path expects a string path")
+        run(lambda: isinstance(FILETYPES, set) or Exception(), err="accepted-filetypes expects a list of inputs")
+        run(lambda: isinstance(ARGUMENTS, list) or Exception(), err="default-args expects a list of inputs")
+    
+    #commandline helpers & input checking
+
+    def is_valid_name(s: str) -> bool:
+        s = s.lower()
+        return any( s.endswith(i.lower()) for i in FILETYPES )
+    
+    def arg_split(args: list[str]) -> tuple[list[str], Path, list[str]]:
+        if not args:
+            return [], Path(":\0:invalid"), []
+        try:                # [locals] [path] -- [others]
+            splitter = args.index("--") - 1
+            run(lambda: splitter < 0 and ValueError(), err=HELP_OUTPUT)
+            return args[:splitter], Path(args[splitter]).expanduser().resolve(), args[splitter+2:]
+        except ValueError:  # [locals] [path]
+            return args[:-1], Path(args[-1]).expanduser(), []
+    
+    run(lambda: len(sys.argv) <= 1 and Exception(), err=HELP_OUTPUT)
+
+    # input parameters
+    local_args, path_arg, pass_args = arg_split([i.strip() for i in sys.argv[1:]])
+    files = []
+
+    run(lambda: path_arg.exists() or Exception(), f"{path_arg}: No such file or directory")
+    
+    if path_arg.is_dir():
+        files = [
+            i for i in path_arg.iterdir()
+            if
+                i.is_file()
+                and is_valid_name( i.name )
+        ]
+    elif is_valid_name(path_arg.name):
+        files = [path_arg]
+
+    
+    run(lambda: len(files) or Exception(), err=f"{path_arg}: No suitable file(s) found.")
+    final_args = ScriptArguments(ARGUMENTS).set(local_args)
+    
+    # check for existing at cached location
+    cache = run(Path(CACHE_PATH).expanduser().resolve, f"Couldn't generate cache at {CACHE_PATH}")
+    run(lambda: Path.mkdir(cache, parents=True, exist_ok=True), f"Couldn't generate cache at {CACHE_PATH}")
+
+    return ExecState(
+        CachePath   = cache.resolve(),
+        Files       = files,
+        Arguments   = final_args,
+        PassArgs    = pass_args
+    )
+
+
+def grayscale_at(input: Path, output:Path):
+    Image.open(input).convert('L').save(output)
+
+@dataclass
+class LiveState:
+    Exec: ExecState
+    Instance: Instance
+    Current: Path | None = None
+    LastUpdate: float = 0
+
+    @staticmethod
+    def _fetch(p: Path, args: list[str]):
+        # would fail here sometimes
+        custom_env = os.environ.copy()
+        custom_env["COLORTERM"] = "truecolor"
+        custom_env["TERM"] = "xterm-256color"
+        
+        args = ["ascii-image-converter"] + args + [str(p)]
+        result = subprocess.run(args, env=custom_env, capture_output=True, text=True)
+        return result.stdout
+    
+    def _fetch_or_gen_cache(self, p:Path) -> Path:
+        cached = (self.Exec.CachePath / (p.stem + "-ascii-art.png"))
+        if cached.exists():
+            return cached
+        
+        # experimental (failed)
+        if 0:
+            grey_cached = self.Exec.CachePath / ("grey"+cached.name)
+            run(lambda: grayscale_at(p, grey_cached), err="Failed to grayscale image")
+            out = LiveState._fetch(grey_cached, self.Exec.PassArgs)
+        else:
+            dims = [
+                "-d", f"{self.Instance.cols},{str(self.Instance.rows)}",
+                "--save-img", str(cached.parent)
+                ]
+            out = LiveState._fetch(p, self.Exec.PassArgs+dims)
+        run(lambda:out.startswith("Error") and Exception(), err=f"ascii-image-converter: {out}")
+        #
+        # cached.write_text( out )
+        return self._fetch_or_gen_cache(p)
+        
+    def ready(self):
+        if not self.LastUpdate:
+            return True
+        if self.Exec.Arguments.speed == 0:
+            return False
+        return time() - self.LastUpdate >= self.Exec.Arguments.speed
+    
+
+    def next(self) -> Path:
+        if self.Current and len(self.Exec.Files) <= 1:
+            self.LastUpdate = time()
+        else:
+            cur = choice([i for i in self.Exec.Files if i is not self.Current])
+            self.Instance.set( self._fetch_or_gen_cache(cur) )
+            self.Current = cur
+        
+        self.LastUpdate = time()
+        return self.Current
